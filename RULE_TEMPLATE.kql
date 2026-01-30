@@ -1,0 +1,102 @@
+// ============================================================================
+// COMPOSITE HUNT (Tier-3 Production)
+// RuleName: <RULE_NAME>
+// Author: Ala Dabat
+//
+// PURPOSE
+//   Behaviour-first composite detection for <THREAT ECOSYSTEM>
+//
+// MINIMUM TRUTH (Anchor)
+//   - <Single unavoidable behavioural event>
+//
+// REINFORCEMENT (Convergence)
+//   - Signal A: <Context join>
+//   - Signal B: <Artefact correlation>
+//   - Signal C: <Org prevalence rarity>
+//
+// NOISE SUPPRESSION
+//   - Safe vendor/path suppression
+//   - Baseline account handling
+//   - Structural gating (not allowlist spam)
+//
+// OUTPUTS
+//   - RiskScore + Severity + Confidence
+//   - Embedded HuntingDirectives
+//
+// MITRE ALIGNMENT
+//   - TAxxxx <Tactic>
+//   - Txxxx.xxx <Technique>
+//
+// ============================================================================
+
+let Lookback = 7d;
+let CorrWindow = 20m;
+
+// --------------------
+// 0) Tunables
+// --------------------
+let SafeVendors = dynamic(["microsoft","google","adobe"]);
+let BaselineAccounts = dynamic(["NT AUTHORITY\\SYSTEM"]);
+
+// --------------------
+// 1) Minimum Truth Anchor
+// --------------------
+let BaseTruth =
+DeviceProcessEvents
+| where Timestamp >= ago(Lookback)
+| where <BASE_BEHAVIOUR>
+| project Timestamp, DeviceId, DeviceName, AccountName,
+          FileName, ProcessCommandLine;
+
+// --------------------
+// 2) Reinforcement Signals
+// --------------------
+let ReinforcementA =
+DeviceNetworkEvents
+| where Timestamp >= ago(Lookback)
+| where <NETWORK_SIGNAL>
+| project DeviceId, NetTime=Timestamp, RemoteIP;
+
+let ReinforcementB =
+DeviceRegistryEvents
+| where Timestamp >= ago(Lookback)
+| where <ARTEFACT_SIGNAL>
+| project DeviceId, RegTime=Timestamp, RegistryKey;
+
+// --------------------
+// 3) Org Prevalence
+// --------------------
+let Prevalence =
+DeviceFileEvents
+| where Timestamp >= ago(30d)
+| summarize DeviceCount=dcount(DeviceId) by SHA256;
+
+// --------------------
+// 4) Correlation + Scoring
+// --------------------
+BaseTruth
+| join kind=leftouter ReinforcementA on DeviceId
+| join kind=leftouter ReinforcementB on DeviceId
+| join kind=leftouter Prevalence on SHA256
+| extend IsRare = toint(DeviceCount <= 2)
+
+| extend RiskScore =
+      60
+    + 20 * toint(isnotempty(NetTime))
+    + 20 * toint(isnotempty(RegTime))
+    + 10 * IsRare
+
+| extend Severity = case(
+    RiskScore >= 100, "CRITICAL",
+    RiskScore >= 80,  "HIGH",
+    "MEDIUM"
+)
+
+| extend HuntingDirectives = pack_array(
+    "[SUMMARY] Composite behavioural convergence detected.",
+    "[NEXT] Pivot across estate, validate legitimacy, contain if unauthorized."
+)
+
+| project Timestamp, Severity, RiskScore, DeviceName,
+          FileName, ProcessCommandLine, HuntingDirectives
+| order by RiskScore desc
